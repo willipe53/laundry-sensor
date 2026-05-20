@@ -1,0 +1,4 @@
+arecord -l
+rpicam-jpeg --nopreview -o ~/test.jpg
+rpicam-vid -t 5000 --nopreview --codec libav --libav-format mp4 -o ~/test.mp4
+arecord -D plughw:0 -c1 -r 48000 -f S32_LE -t wav -d 5 ~/test.wav

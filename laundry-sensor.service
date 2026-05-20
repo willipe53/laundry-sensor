@@ -1,0 +1,17 @@
+[Unit]
+Description=Laundry Sensor Web Interface
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/laundry-sensor
+ExecStart=/opt/laundry-sensor/venv/bin/python laundry_server.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
