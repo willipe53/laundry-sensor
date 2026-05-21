@@ -3,7 +3,8 @@
 A Raspberry Pi Zero 2W with a microphone that listens to the laundry
 room. It records audio for downstream AI analysis of washer and dryer
 sound signatures to detect when a cycle is complete. A web UI lets you
-start/stop recordings and play them back from any device on the network.
+start/stop recordings, add timestamped notes, and play them back from
+any device on the network.
 
 ![Laundry Sensor](laundry.png)
 
@@ -17,8 +18,35 @@ start/stop recordings and play them back from any device on the network.
 | Enclosure   | 3D-printed two-piece case (`laun_frt.3mf`, `laun_bk.3mf`) |
 | Network     | Hostname `laundry` (mDNS `laundry.local`) |
 
-See [CAPTURE_SETUP.md](CAPTURE_SETUP.md) for wiring diagrams, boot
-configuration, and capture planning.
+### INMP441 wiring
+
+| Mic Pin | Pi Zero Pin        | GPIO Function |
+|---------|--------------------|---------------|
+| VDD     | Pin 1 (3.3V)       | Power         |
+| GND     | Pin 6 (GND)        | Ground        |
+| SCK     | Pin 12 (GPIO 18)   | PCM_CLK       |
+| WS      | Pin 35 (GPIO 19)   | PCM_FS        |
+| SD      | Pin 38 (GPIO 20)   | PCM_DIN       |
+| L/R     | Pin 6 (GND)        | Left channel  |
+
+### I2S boot configuration
+
+Add to `/boot/firmware/config.txt` (reboot required):
+
+```
+dtparam=i2s=on
+dtoverlay=googlevoicehat-soundcard
+```
+
+The `googlevoicehat-soundcard` overlay is a generic I2S mic driver, not
+specific to Google hardware.
+
+### Quick mic test
+
+```bash
+arecord -D plughw:0 -c1 -r 48000 -f S32_LE -t wav -d 5 ~/test.wav
+scp willipe@laundry:~/test.wav .
+```
 
 ## Deploy
 
@@ -101,3 +129,17 @@ mkcert -install  # on the other Mac, after copying the CA files
 On iOS, you can AirDrop the root CA (`mkcert -CAROOT` to find it),
 install the profile, and enable full trust in Settings > General >
 About > Certificate Trust Settings.
+
+## Capture plan
+
+The goal is to record one complete laundry load to capture three distinct
+audio environments for later analysis:
+
+1. **Washer running alone** (~45 min)
+2. **Washer + dryer running together** (overlap period)
+3. **Dryer running alone** (~45 min)
+
+Start the capture before loading the washer. Use the Notes panel in the
+web UI to tag state changes (BOTH_STOPPED, WASHER_ONLY, DRYER_ONLY,
+BOTH_RUNNING). The recording and notes JSON are downloaded together as
+a zip for analysis.
