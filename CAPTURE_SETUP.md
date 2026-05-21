@@ -1,6 +1,6 @@
-# Laundry Sensor — Audio/Video Capture Setup
+# Laundry Sensor — Audio Capture Setup
 
-Dedicated capture device to record washer and dryer audio/video for
+Dedicated capture device to record washer and dryer audio for
 downstream AI analysis of discrete sound signatures.
 
 ## Hardware
@@ -8,17 +8,11 @@ downstream AI analysis of discrete sound signatures.
 | Component | Details |
 |-----------|---------|
 | SBC | Raspberry Pi Zero 2W (Debian Trixie Lite, aarch64) |
-| Camera | 5MP OV5647 CSI camera (Pi Zero V1.3 form factor, ribbon cable) |
 | Microphone | INMP441 I2S MEMS omnidirectional mic (soldered to GPIO) |
 | Power | 5V USB wall charger via micro-USB port |
 | Network | SSH + HTTPS web UI, hostname `laundry` (mDNS → `laundry.local`) |
 
 ## Wiring
-
-### Camera
-
-Connects via the CSI ribbon cable to the camera connector on the Pi Zero.
-Contacts face toward the board.
 
 ### INMP441 Microphone → Pi Zero GPIO
 
@@ -35,7 +29,7 @@ Contacts face toward the board.
 
 3D-printed two-piece enclosure (front and back). Mesh files in repo:
 
-- `laun_frt.3mf` — front panel (camera opening)
+- `laun_frt.3mf` — front panel
 - `laun_bk.3mf` — back panel
 
 ## Boot Configuration (I2S Microphone)
@@ -53,35 +47,37 @@ INMP441 needs. Reboot required after changes.
 
 ## Verified Device Mapping
 
-Both devices confirmed working after soldering and configuration.
-
 | Resource | Interface |
 |----------|-----------|
-| Video capture | CSI camera via `rpicam-vid` / `rpicam-jpeg` |
 | Audio capture | ALSA via `arecord` (I2S, `googlevoicehat-soundcard`) |
 
 ## Web Interface
 
-A FastAPI server (`laundry_server.py`) streams live MJPEG from the camera
+A FastAPI server (`laundry_server.py`) provides an audio recorder UI
 over HTTPS on port 443. It runs as a systemd service that starts on boot.
+
+Features:
+- Start/stop recording from the browser
+- Browse and play back all saved recordings
+- Download or delete recordings
 
 ### Deploy from your Mac
 
 ```bash
 cd ~/github/laundry-sensor
-./deploy.py
+python deploy.py
 ```
 
 `deploy.py` SCPs the app files to the Pi and SSHes in to:
 
 1. Copy files to `/opt/laundry-sensor` and create a Python venv
 2. Install FastAPI + uvicorn
-3. Generate a self-signed TLS certificate in `/etc/laundry-sensor/` (first run only)
-4. Install, enable, and restart the `laundry-sensor` systemd service
+3. Create `/home/willipe/recordings/` for audio files
+4. Generate a self-signed TLS certificate in `/etc/laundry-sensor/` (first run only)
+5. Install, enable, and restart the `laundry-sensor` systemd service
 
 Subsequent deploys after code changes are the same single command.
-Open **https://laundry.local** in your browser and accept the
-self-signed certificate warning.
+Open **https://laundry** in your browser.
 
 ### Service management
 
@@ -94,32 +90,11 @@ sudo journalctl -u laundry-sensor -f
 ## Pre-installed Software
 
 ```
-rpicam-apps  (rpicam-vid, rpicam-jpeg)
 alsa-utils
-ffmpeg       (sudo apt install ffmpeg)
 python3 + venv
 ```
 
 ## Quick Tests
-
-### Camera — capture a still image
-
-```bash
-rpicam-jpeg --nopreview -o ~/test.jpg
-```
-
-### Camera — capture 5 seconds of video
-
-```bash
-rpicam-vid -t 5000 --nopreview --codec libav --libav-format mp4 -o ~/test.mp4
-```
-
-If the `--codec libav` path isn't available, record raw H.264 and wrap:
-
-```bash
-rpicam-vid -t 5000 --nopreview -o ~/test.h264
-ffmpeg -i ~/test.h264 ~/test.mp4
-```
 
 ### Microphone — record 5 seconds of audio
 
@@ -130,8 +105,7 @@ arecord -D plughw:0 -c1 -r 48000 -f S32_LE -t wav -d 5 ~/test.wav
 ### Copy test files to laptop
 
 ```bash
-scp willipe@<pi-ip>:~/test.mp4 .
-scp willipe@<pi-ip>:~/test.wav .
+scp willipe@laundry:~/test.wav .
 ```
 
 ## Capture Plan
@@ -149,26 +123,20 @@ for each appliance state.
 
 ## Storage Estimates
 
-The Pi Zero 2W has limited on-board storage (SD card). For extended
-captures, either stream files off-device or use a large SD card.
+Recordings are 48 kHz mono 32-bit WAV.
 
 | Stream | Approximate bitrate | Per hour |
 |--------|---------------------|----------|
-| 1080p30 H.264 video | ~5–8 Mbit/s | ~2.3–3.6 GB |
 | 48 kHz mono WAV audio | ~1.5 Mbit/s | ~0.7 GB |
-| Combined (compressed) | ~6–10 Mbit/s | ~2.7–4.5 GB |
 
-A full washer + dryer cycle (~2 hours) will use roughly 5–9 GB depending
-on encoding settings.
+A full washer + dryer cycle (~2 hours) will use roughly 1.4 GB.
 
 ## Status
 
 - [x] Pi Zero 2W imaged with Trixie Lite
-- [x] Camera connected and tested (CSI ribbon cable)
 - [x] INMP441 microphone soldered to GPIO and tested (I2S)
 - [x] I2S driver configured (`googlevoicehat-soundcard` overlay)
 - [x] 3D-printed enclosure designed (`laun_frt.3mf`, `laun_bk.3mf`)
-- [x] Web interface — live MJPEG stream via FastAPI
-- [ ] Web interface — record video / audio / download buttons
+- [x] Web interface — audio recorder with playback
 - [ ] Mount in laundry room
 - [ ] First full capture session

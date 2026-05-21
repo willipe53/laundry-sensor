@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deploy laundry-sensor to the Pi Zero 2W over SSH."""
+"""Deploy laundry-sensor (audio recorder) to the Pi Zero 2W over SSH."""
 
 import subprocess
 import sys
@@ -23,7 +23,7 @@ REMOTE_SETUP = f"""\
 #!/usr/bin/env bash
 set -e
 
-echo "[2/4] Installing app and dependencies..."
+echo "[2/5] Installing app and dependencies..."
 sudo mkdir -p {INSTALL_DIR}
 sudo cp {REMOTE_TMP}/laundry_server.py {REMOTE_TMP}/requirements.txt {INSTALL_DIR}/
 if [ ! -d {INSTALL_DIR}/venv ]; then
@@ -34,7 +34,12 @@ echo "  Installing pip packages..."
 sudo {INSTALL_DIR}/venv/bin/pip install --quiet -r {INSTALL_DIR}/requirements.txt
 
 echo ""
-echo "[3/4] Ensuring TLS certificate..."
+echo "[3/5] Creating recordings directory..."
+sudo mkdir -p /home/willipe/recordings
+sudo chown willipe:willipe /home/willipe/recordings
+
+echo ""
+echo "[4/5] Ensuring TLS certificate..."
 sudo mkdir -p {CERT_DIR}
 if [ ! -f {CERT_DIR}/cert.pem ]; then
     echo "  Generating self-signed cert..."
@@ -47,7 +52,7 @@ else
 fi
 
 echo ""
-echo "[4/4] Installing systemd service..."
+echo "[5/5] Installing systemd service..."
 sudo cp {REMOTE_TMP}/laundry-sensor.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable laundry-sensor.service
@@ -60,8 +65,7 @@ echo "=== Done ==="
 echo ""
 sudo systemctl status laundry-sensor.service --no-pager || true
 echo ""
-echo "Open https://laundry.local in your browser."
-echo "(Accept the self-signed certificate warning.)"
+echo "Open https://laundry in your browser."
 """
 
 
@@ -79,7 +83,7 @@ def main():
 
     try:
         # 1. SCP app files + setup script to the Pi
-        print("[1/4] Copying files to Pi...")
+        print("[1/5] Copying files to Pi...")
         run(f"ssh {PI} 'mkdir -p {REMOTE_TMP}'")
         sources = " ".join(str(REPO_DIR / f) for f in APP_FILES)
         run(f"scp {sources} {setup_script} {PI}:{REMOTE_TMP}/")
