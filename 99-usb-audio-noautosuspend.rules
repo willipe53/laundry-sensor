@@ -1,0 +1,19 @@
+# Disable USB autosuspend on USB audio class devices.
+#
+# Cheap USB mics frequently wedge after the kernel suspends them following
+# long idle periods, which manifests as `arecord` hanging or returning EIO
+# after a few days of inactivity. Forcing power/control=on keeps the device
+# awake at all times. The tradeoff is negligible (a few mA on a wall-powered
+# Pi); the win is the sensor stops needing a power cycle.
+#
+# Install on the Pi as:
+#   sudo cp 99-usb-audio-noautosuspend.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger
+#
+# Matches USB Audio class (bInterfaceClass=0x01). If your dongle exposes a
+# non-standard class you can match by ID instead with:
+#   ATTR{idVendor}=="XXXX", ATTR{idProduct}=="YYYY"
+
+ACTION=="add|change", SUBSYSTEM=="usb", ATTR{bInterfaceClass}=="01", TEST=="power/control", ATTR{power/control}="on"
+ACTION=="add|change", SUBSYSTEM=="usb", ATTR{bDeviceClass}=="00", ATTR{bDeviceSubClass}=="00", TEST=="power/control", ATTR{power/autosuspend_delay_ms}="-1"

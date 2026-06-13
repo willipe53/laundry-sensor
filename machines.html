@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Laundry Machines</title>
+<style>
+  body {
+    margin: 0;
+    background: #1a1a2e;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    color: #e0e0e0;
+  }
+
+  .machines-container {
+    position: relative;
+    width: 810px;
+    height: 574px;
+  }
+
+  .clothes-layer {
+    position: absolute;
+    width: 341px;
+    height: 341px;
+    background-image: url('clothes.png');
+    background-size: cover;
+    border-radius: 50%;
+  }
+
+  #clothes-dryer {
+    left: calc(201px - 170.5px);
+    top: calc(259px - 170.5px);
+  }
+
+  #clothes-washer {
+    left: calc(607px - 170.5px);
+    top: calc(259px - 170.5px);
+  }
+
+  .machines-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 810px;
+    height: 574px;
+    background-image: url('machines.png');
+    background-size: cover;
+    pointer-events: none;
+  }
+
+  .controls {
+    margin-top: 30px;
+    display: flex;
+    gap: 60px;
+    align-items: flex-start;
+  }
+
+  .machine-control {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    min-width: 180px;
+  }
+
+  .machine-control h2 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+
+  .toggle-btn {
+    padding: 10px 36px;
+    border: none;
+    border-radius: 6px;
+    font-size: 16px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color 0.2s, color 0.2s;
+    min-width: 120px;
+  }
+
+  .toggle-btn.off {
+    background: #444;
+    color: #ccc;
+  }
+
+  .toggle-btn.on {
+    background: #2ecc71;
+    color: #fff;
+  }
+
+  .params {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 20px;
+    padding: 16px 24px;
+    background: #16213e;
+    border-radius: 8px;
+    border: 1px solid #334;
+  }
+
+  .params h3 {
+    margin: 0 0 4px 0;
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #888;
+    text-align: center;
+  }
+
+  .param-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    justify-content: space-between;
+  }
+
+  .param-row label {
+    font-size: 14px;
+    color: #aaa;
+  }
+
+  .param-row input {
+    width: 80px;
+    padding: 5px 8px;
+    border: 1px solid #445;
+    border-radius: 4px;
+    background: #0f3460;
+    color: #e0e0e0;
+    font-size: 14px;
+    text-align: right;
+  }
+</style>
+</head>
+<body>
+
+<div class="machines-container">
+  <div id="clothes-dryer" class="clothes-layer"></div>
+  <div id="clothes-washer" class="clothes-layer"></div>
+  <div class="machines-overlay"></div>
+</div>
+
+<div class="controls">
+  <div class="machine-control">
+    <h2>Dryer</h2>
+    <button id="btn-dryer" class="toggle-btn off" onclick="toggle('dryer')">OFF</button>
+  </div>
+
+  <div class="params">
+    <h3>Animation</h3>
+    <div class="param-row">
+      <label>Degrees:</label>
+      <input id="degrees" type="number" value="30" min="1" max="360" onchange="updateParams()">
+    </div>
+    <div class="param-row">
+      <label>Milliseconds:</label>
+      <input id="interval" type="number" value="100" min="16" max="5000" onchange="updateParams()">
+    </div>
+  </div>
+
+  <div class="machine-control">
+    <h2>Washer</h2>
+    <button id="btn-washer" class="toggle-btn off" onclick="toggle('washer')">OFF</button>
+  </div>
+</div>
+
+<script>
+  const state = {
+    dryer: { on: false, angle: 0, timer: null, el: document.getElementById('clothes-dryer') },
+    washer: { on: false, angle: 0, timer: null, el: document.getElementById('clothes-washer') },
+  };
+
+  let degreesPerTick = 30;
+  let intervalMs = 100;
+
+  function tick(machine) {
+    const s = state[machine];
+    const direction = machine === 'dryer' ? -1 : 1;
+    s.angle = (s.angle + degreesPerTick * direction + 360) % 360;
+    s.el.style.transform = `rotate(${s.angle}deg)`;
+  }
+
+  function startRotation(machine) {
+    const s = state[machine];
+    if (s.timer) clearInterval(s.timer);
+    s.timer = setInterval(() => tick(machine), intervalMs);
+  }
+
+  function stopRotation(machine) {
+    const s = state[machine];
+    if (s.timer) {
+      clearInterval(s.timer);
+      s.timer = null;
+    }
+  }
+
+  function toggle(machine) {
+    const s = state[machine];
+    s.on = !s.on;
+    const btn = document.getElementById(`btn-${machine}`);
+    if (s.on) {
+      btn.textContent = 'ON';
+      btn.className = 'toggle-btn on';
+      startRotation(machine);
+    } else {
+      btn.textContent = 'OFF';
+      btn.className = 'toggle-btn off';
+      stopRotation(machine);
+    }
+  }
+
+  function updateParams() {
+    degreesPerTick = parseInt(document.getElementById('degrees').value) || 10;
+    intervalMs = parseInt(document.getElementById('interval').value) || 1000;
+    for (const machine of ['dryer', 'washer']) {
+      if (state[machine].on) {
+        startRotation(machine);
+      }
+    }
+  }
+</script>
+
+</body>
+</html>

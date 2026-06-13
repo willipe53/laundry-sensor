@@ -4,12 +4,21 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 User=root
 WorkingDirectory=/opt/laundry-sensor
+EnvironmentFile=-/etc/laundry-sensor/alerts.env
 ExecStart=/opt/laundry-sensor/venv/bin/python laundry_server.py
-Restart=on-failure
+Restart=always
 RestartSec=5
+# If the process stops pinging WATCHDOG=1 for this long, systemd kills+restarts it.
+# Set to ~2x MONITOR_INTERVAL_SEC (default 300s) so a single slow tick is tolerated.
+WatchdogSec=600
+# Belt-and-suspenders: proactively cycle the process once a day to shake off any slow leaks
+# or wedged kernel resources (USB autosuspend, ALSA buffers, etc.).
+RuntimeMaxSec=1d
+ReadWritePaths=/var/lib/laundry-sensor
 StandardOutput=journal
 StandardError=journal
 

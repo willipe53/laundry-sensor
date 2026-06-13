@@ -1,21 +1,177 @@
 #!/usr/bin/env python3
-"""Laundry sensor web interface — audio recorder and playback."""
+"""Laundry sensor web interface — audio recorder, playback, and monitor."""
 
 import asyncio
 import io
 import json
+import logging
 import os
+import socket
 import struct
+import subprocess
 import time
 import zipfile
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 import uvicorn
 
-app = FastAPI(title="Laundry Sensor")
+import monitor
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s %(name)s %(levelname)s %(message)s")
+
+# ---------------------------------------------------------------------------
+# Configuration (overridable via env)
+# ---------------------------------------------------------------------------
+
+MONITOR_INTERVAL_SEC = int(os.environ.get("MONITOR_INTERVAL_SEC", "60"))
+SAMPLE_SECONDS = float(os.environ.get("SAMPLE_SECONDS", "5"))
+DEBOUNCE_SAMPLES = int(os.environ.get("DEBOUNCE_SAMPLES", "2"))
+MAX_DIST_FOR_CONFIDENCE = float(os.environ.get("MAX_DIST_FOR_CONFIDENCE", "50.0"))
+CAL_OFFSET_DB = os.environ.get("CAL_OFFSET_DB", "")
+RETRAIN_ALPHA = float(os.environ.get("RETRAIN_ALPHA", "0.1"))
+# After this many consecutive failed samples, exit so systemd restarts us.
+# At the default 5-min interval, 5 failures = ~25 minutes of bad mic state.
+MAX_CONSECUTIVE_SAMPLE_FAILURES = int(
+    os.environ.get("MAX_CONSECUTIVE_SAMPLE_FAILURES", "5"))
+# How often the watchdog/heartbeat task pings systemd. Must be well below
+# WatchdogSec in the unit file (currently 600s).
+HEARTBEAT_INTERVAL_SEC = int(os.environ.get("HEARTBEAT_INTERVAL_SEC", "60"))
+# How long to wait for arecord to exit after SIGTERM in /stop before SIGKILL.
+RECORDING_STOP_TIMEOUT_SEC = float(
+    os.environ.get("RECORDING_STOP_TIMEOUT_SEC", "10"))
+
+# ---------------------------------------------------------------------------
+# Monitor state (loaded at startup)
+# ---------------------------------------------------------------------------
+
+_signatures: dict = {}
+_mel_fb: np.ndarray | None = None
+_state_machine: monitor.StateMachine | None = None
+_monitor_enabled: bool = True
+_monitor_task: asyncio.Task | None = None
+_heartbeat_task: asyncio.Task | None = None
+_last_sample_time: float = 0.0
+_last_sample_distances: dict = {}
+_last_sample_label: str = ""
+_last_sample_distance: float = 0.0
+_cal_offset: np.ndarray | None = None
+_mic_lock: asyncio.Lock | None = None
+_consecutive_sample_failures: int = 0
+_process_start_time: float = time.time()
+
+HISTORY_LOG = Path(__file__).resolve().parent / "history.log"
+
+
+def _sd_notify(message: str) -> None:
+    """Send a sd_notify(3) message to systemd if running under Type=notify.
+
+    Silently no-ops if NOTIFY_SOCKET is unset (e.g. dev runs).
+    """
+    addr = os.environ.get("NOTIFY_SOCKET")
+    if not addr:
+        return
+    try:
+        if addr.startswith("@"):
+            addr = "\0" + addr[1:]
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+            sock.sendto(message.encode(), addr)
+    except OSError as exc:
+        logger.debug("sd_notify(%r) failed: %s", message, exc)
+
+
+def _is_recording() -> bool:
+    """True iff a user-initiated arecord recording is currently in progress."""
+    return _recording_proc is not None and _recording_proc.returncode is None
+
+
+def _log_observation(state: str):
+    """Append state to history.log if it differs from the last recorded state."""
+    try:
+        last_state = None
+        if HISTORY_LOG.is_file():
+            text = HISTORY_LOG.read_text()
+            lines = text.rstrip("\n").split("\n") if text.strip() else []
+            if lines:
+                last_line = lines[-1]
+                if ": " in last_line:
+                    last_state = last_line.rsplit(": ", 1)[-1].strip()
+        if state != last_state:
+            ts = time.strftime("%a %b %d %H:%M:%S %Z %Y")
+            with open(HISTORY_LOG, "a") as f:
+                f.write(f"{ts}: {state}\n")
+    except OSError as exc:
+        logger.warning("Could not write history.log: %s", exc)
+
+
+def _step_and_track(label, vec, dist, all_d) -> list:
+    """Run the state machine step and log state changes."""
+    old_state = _state_machine.current_state
+    events = _state_machine.step(label, vec, dist, all_d)
+    new_state = _state_machine.current_state
+    if old_state != new_state:
+        _log_observation(new_state)
+    return events
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _signatures, _mel_fb, _state_machine, _monitor_task, _cal_offset
+    global _monitor_enabled, _mic_lock, _heartbeat_task
+    _mic_lock = asyncio.Lock()
+
+    # Belt: make sure no stray arecord from a previous (perhaps crashed) run
+    # is still holding the mic. Best-effort, must not block startup.
+    await asyncio.to_thread(_cleanup_stray_arecord)
+
+    sig_path = Path(__file__).with_name("signatures.json")
+    if sig_path.is_file():
+        _signatures = json.loads(sig_path.read_text())
+        _mel_fb = monitor.build_mel_filterbank(
+            _signatures["sample_rate"], _signatures["n_fft"],
+            _signatures["n_mel"], _signatures["fmin"], _signatures["fmax"])
+        _state_machine = monitor.StateMachine.load(
+            debounce_samples=DEBOUNCE_SAMPLES)
+        _cal_offset = monitor.load_calibration()
+        if CAL_OFFSET_DB:
+            _cal_offset = np.full(_signatures["n_mel"],
+                                  float(CAL_OFFSET_DB), dtype=np.float32)
+        _monitor_task = asyncio.create_task(_monitor_loop())
+        logger.info("Monitor started (interval=%ds, state=%s)",
+                    MONITOR_INTERVAL_SEC, _state_machine.current_state)
+    else:
+        logger.warning("signatures.json not found — monitor disabled")
+        _monitor_enabled = False
+
+    # Start watchdog heartbeat regardless of monitor state, then tell systemd
+    # we're ready. The heartbeat is what keeps WatchdogSec from killing us.
+    _heartbeat_task = asyncio.create_task(_heartbeat_loop())
+    _sd_notify("READY=1")
+    _sd_notify(f"STATUS=ready; monitor={'on' if _monitor_enabled else 'off'}")
+
+    yield
+
+    _sd_notify("STOPPING=1")
+    for task in (_monitor_task, _heartbeat_task):
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+
+app = FastAPI(title="Laundry Sensor", lifespan=lifespan)
 
 RECORDINGS_DIR = Path("/home/willipe/recordings")
 RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -64,7 +220,7 @@ def _wav_duration(path: Path) -> float | None:
 async def start_recording():
     global _recording_proc, _recording_file, _recording_start
 
-    if _recording_proc is not None and _recording_proc.returncode is None:
+    if _is_recording():
         raise HTTPException(409, "Already recording")
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -85,11 +241,20 @@ async def start_recording():
 async def stop_recording():
     global _recording_proc, _recording_file, _recording_start
 
-    if _recording_proc is None or _recording_proc.returncode is not None:
+    if not _is_recording():
         raise HTTPException(409, "Not recording")
 
     _recording_proc.terminate()
-    await _recording_proc.wait()
+    try:
+        await asyncio.wait_for(_recording_proc.wait(),
+                               timeout=RECORDING_STOP_TIMEOUT_SEC)
+    except asyncio.TimeoutError:
+        logger.warning("arecord ignored SIGTERM; sending SIGKILL")
+        _recording_proc.kill()
+        try:
+            await asyncio.wait_for(_recording_proc.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            logger.error("arecord still alive after SIGKILL; giving up wait")
     stopped_file = _recording_file
     _recording_proc = None
     _recording_file = None
@@ -99,7 +264,7 @@ async def stop_recording():
 
 @app.get("/status")
 async def recording_status():
-    if _recording_proc is not None and _recording_proc.returncode is None:
+    if _is_recording():
         elapsed = time.monotonic() - _recording_start if _recording_start else 0
         return {"recording": True, "filename": _recording_file, "elapsed": round(elapsed, 1)}
     return {"recording": False}
@@ -122,7 +287,7 @@ def _save_notes(wav_filename: str, data: dict):
 
 @app.post("/note")
 async def add_note(body: dict):
-    if _recording_proc is None or _recording_proc.returncode is not None:
+    if not _is_recording():
         raise HTTPException(409, "Not recording")
 
     text = body.get("text", "").strip()
@@ -206,347 +371,317 @@ async def delete_recording(filename: str):
     return {"status": "deleted", "filename": filename}
 
 
-INDEX_HTML = """\
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 -960 960 960' fill='%23000000'%3E%3Cpath d='M240-80q-33 0-56.5-23.5T160-160v-640q0-33 23.5-56.5T240-880h480q33 0 56.5 23.5T800-800v640q0 33-23.5 56.5T720-80H240Zm0-80h480v-640H240v640Zm381.5-98.5Q680-317 680-400t-58.5-141.5Q563-600 480-600t-141.5 58.5Q280-483 280-400t58.5 141.5Q397-200 480-200t141.5-58.5ZM480-268q-26 0-50.5-9.5T386-306l188-188q19 19 28.5 43.5T612-400q0 55-38.5 93.5T480-268ZM320-680q17 0 28.5-11.5T360-720q0-17-11.5-28.5T320-760q-17 0-28.5 11.5T280-720q0 17 11.5 28.5T320-680Zm148.5-11.5Q480-703 480-720t-11.5-28.5Q457-760 440-760t-28.5 11.5Q400-737 400-720t11.5 28.5Q423-680 440-680t28.5-11.5ZM240-160v-640 640Z'/%3E%3C/svg%3E">
-  <title>Laundry Sensor</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: system-ui, -apple-system, sans-serif;
-      background: #0f172a;
-      color: #e2e8f0;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      min-height: 100vh;
-      padding: 1.5rem 1rem;
-    }
-    h1 {
-      font-size: 1.4rem;
-      font-weight: 600;
-      margin-bottom: 1rem;
-      color: #94a3b8;
-      letter-spacing: 0.05em;
-      text-transform: uppercase;
-    }
-    .card {
-      background: #1e293b;
-      border-radius: 12px;
-      padding: 1.5rem;
-      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
-      width: 100%;
-      max-width: 500px;
-      margin-bottom: 1rem;
-    }
-    .status {
-      text-align: center;
-      font-size: 1rem;
-      margin-bottom: 1rem;
-      min-height: 1.5em;
-    }
-    .status.idle { color: #64748b; }
-    .status.recording { color: #f87171; }
-    .controls {
-      display: flex;
-      gap: 0.75rem;
-      justify-content: center;
-    }
-    button {
-      padding: 0.6rem 1.5rem;
-      border: 1px solid #334155;
-      border-radius: 8px;
-      background: #1e293b;
-      color: #cbd5e1;
-      font-size: 0.95rem;
-      cursor: pointer;
-      transition: background 0.15s, opacity 0.15s;
-    }
-    button:hover:not(:disabled) { background: #334155; }
-    button:disabled { opacity: 0.35; cursor: default; }
-    button.rec { border-color: #991b1b; color: #fca5a5; }
-    button.rec:hover:not(:disabled) { background: #450a0a; }
-    button.stop { border-color: #854d0e; color: #fde68a; }
-    button.stop:hover:not(:disabled) { background: #451a03; }
-    h2 {
-      font-size: 1rem;
-      font-weight: 500;
-      color: #94a3b8;
-      margin-bottom: 0.75rem;
-    }
-    .empty { color: #475569; font-size: 0.85rem; }
-    .file {
-      padding: 0.75rem 0;
-      border-bottom: 1px solid #334155;
-    }
-    .file:last-child { border-bottom: none; }
-    .file-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 0.4rem;
-    }
-    .file-name {
-      font-size: 0.85rem;
-      color: #cbd5e1;
-      word-break: break-all;
-    }
-    .file-meta {
-      font-size: 0.75rem;
-      color: #64748b;
-    }
-    .file-actions {
-      display: flex;
-      gap: 0.5rem;
-      flex-shrink: 0;
-    }
-    .file-actions button {
-      padding: 0.35rem 0.5rem;
-      font-size: 0.8rem;
-      border-radius: 6px;
-      display: flex;
-      align-items: center;
-    }
-    .file-actions .del { border-color: #991b1b; color: #fca5a5; }
-    .file-actions .del:hover { background: #450a0a; }
-    .file-actions svg { display: block; }
-    audio {
-      width: 100%;
-      height: 36px;
-      margin-top: 0.4rem;
-      border-radius: 6px;
-    }
-    .notes-card { display: none; }
-    .notes-card.active { display: block; }
-    .note-input {
-      display: flex;
-      gap: 0.5rem;
-      margin-bottom: 0.75rem;
-    }
-    .note-input input {
-      flex: 1;
-      padding: 0.5rem 0.75rem;
-      border: 1px solid #334155;
-      border-radius: 8px;
-      background: #0f172a;
-      color: #e2e8f0;
-      font-size: 0.9rem;
-      outline: none;
-    }
-    .note-input input:focus { border-color: #475569; }
-    .presets {
-      display: flex;
-      gap: 0.4rem;
-      flex-wrap: wrap;
-      margin-bottom: 0.75rem;
-    }
-    .presets button {
-      padding: 0.3rem 0.7rem;
-      font-size: 0.75rem;
-      border-color: #1e40af;
-      color: #93c5fd;
-    }
-    .presets button:hover { background: #1e3a5f; }
-    .notes-log {
-      max-height: 200px;
-      overflow-y: auto;
-      font-size: 0.8rem;
-    }
-    .note-entry {
-      padding: 0.3rem 0;
-      border-bottom: 1px solid #1e293b;
-      color: #94a3b8;
-    }
-    .note-entry span { color: #64748b; margin-right: 0.5rem; }
-    .file-notes {
-      font-size: 0.75rem;
-      color: #64748b;
-      margin-top: 0.3rem;
-    }
-    .file-notes .note-item {
-      padding: 0.15rem 0;
-    }
-    .file-notes .note-item span { color: #475569; margin-right: 0.4rem; }
-  </style>
-</head>
-<body>
-  <h1>Laundry Sensor</h1>
-  <div class="card">
-    <div id="status" class="status idle">Idle</div>
-    <div class="controls">
-      <button class="rec" id="btnRec" onclick="doRecord()"><svg width="10" height="10" viewBox="0 0 10 10" style="margin-right:6px;vertical-align:middle"><circle cx="5" cy="5" r="5" fill="#ef4444"/></svg>Record</button>
-      <button class="stop" id="btnStop" onclick="doStop()" disabled><svg width="10" height="10" viewBox="0 0 10 10" style="margin-right:6px;vertical-align:middle"><rect width="10" height="10" rx="1" fill="#9ca3af"/></svg>Stop</button>
-    </div>
-  </div>
-  <div class="card notes-card" id="notesCard">
-    <h2>Notes</h2>
-    <div class="presets">
-      <button onclick="addPreset('BOTH_STOPPED')">Both Stopped</button>
-      <button onclick="addPreset('WASHER_ONLY')">Washer Only</button>
-      <button onclick="addPreset('DRYER_ONLY')">Dryer Only</button>
-      <button onclick="addPreset('BOTH_RUNNING')">Both Running</button>
-    </div>
-    <div class="note-input">
-      <input type="text" id="noteText" placeholder="Add a note..." onkeydown="if(event.key==='Enter')addNote()">
-      <button onclick="addNote()">Add</button>
-    </div>
-    <div class="notes-log" id="notesLog"></div>
-  </div>
-  <div class="card">
-    <h2>Recordings</h2>
-    <div id="list"><p class="empty">Loading...</p></div>
-  </div>
+# ---------------------------------------------------------------------------
+# Monitor background loop
+# ---------------------------------------------------------------------------
 
-  <script>
-    let polling = null;
+def _cleanup_stray_arecord():
+    """Kill any lingering arecord processes that may be holding the device.
 
-    async function doRecord() {
-      const r = await fetch('/record', {method: 'POST'});
-      if (r.ok) startPolling();
-      else alert((await r.json()).detail || 'Failed to start');
-      refreshAll();
+    Best-effort; runs in a thread so it can't block the event loop.
+    """
+    try:
+        subprocess.run(["pkill", "-9", "arecord"],
+                       stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL,
+                       timeout=5,
+                       check=False)
+    except Exception as exc:
+        logger.debug("pkill arecord cleanup failed: %s", exc)
+
+
+async def _heartbeat_loop():
+    """Independent heartbeat: pings systemd watchdog regardless of mic state.
+
+    This lets systemd kill+restart us if the asyncio loop itself wedges
+    (e.g. blocked on a syscall), while the monitor loop's failure budget
+    handles the case where the loop is alive but the mic is broken.
+    """
+    while True:
+        _sd_notify("WATCHDOG=1")
+        await asyncio.sleep(HEARTBEAT_INTERVAL_SEC)
+
+
+async def _monitor_loop():
+    global _last_sample_time, _last_sample_distances
+    global _last_sample_label, _last_sample_distance
+    global _consecutive_sample_failures
+
+    # Short delay for startup, then take the first sample quickly.
+    # Subsequent samples use the full interval.
+    await asyncio.sleep(10)
+
+    while True:
+        sample_attempted = False
+        try:
+            if _is_recording():
+                logger.debug("Monitor tick skipped — recording in progress")
+            elif not _monitor_enabled:
+                pass
+            elif _mel_fb is None or _state_machine is None:
+                pass
+            else:
+                sample_attempted = True
+                async with _mic_lock:
+                    pcm = await asyncio.to_thread(monitor.capture_sample, SAMPLE_SECONDS)
+                vec = monitor.log_mel_mean(pcm, _signatures["n_fft"],
+                                           _signatures["hop"], _mel_fb)
+                if _cal_offset is not None:
+                    vec = vec - _cal_offset
+
+                label, dist, all_d = monitor.classify(
+                    vec, _signatures, max_dist=MAX_DIST_FOR_CONFIDENCE)
+
+                _last_sample_time = time.time()
+                _last_sample_distances = all_d
+                _last_sample_label = label
+                _last_sample_distance = dist
+                _consecutive_sample_failures = 0
+
+                logger.info("Sample: %s (dist=%.2f) %s", label, dist,
+                            " ".join(f"{k}={v:.1f}" for k, v in
+                                     sorted(all_d.items(), key=lambda x: x[1])))
+
+                events = _step_and_track(label, vec, dist, all_d)
+                for event in events:
+                    logger.info("State: %s (%s -> %s)",
+                                event.kind, event.old_state, event.new_state)
+
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if sample_attempted:
+                _consecutive_sample_failures += 1
+            logger.exception("Monitor loop error (consecutive_failures=%d)",
+                             _consecutive_sample_failures)
+            # Best-effort: clear any zombie arecord that may be holding the mic.
+            await asyncio.to_thread(_cleanup_stray_arecord)
+            if _consecutive_sample_failures >= MAX_CONSECUTIVE_SAMPLE_FAILURES:
+                logger.error(
+                    "Reached %d consecutive sample failures — exiting so "
+                    "systemd restarts the service",
+                    _consecutive_sample_failures)
+                _sd_notify("STOPPING=1")
+                # Use os._exit to skip lifespan teardown (which itself could
+                # be blocked); systemd Restart=always will bring us back.
+                os._exit(2)
+
+        await asyncio.sleep(MONITOR_INTERVAL_SEC)
+
+
+# ---------------------------------------------------------------------------
+# Monitor endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/monitor/status")
+async def monitor_status():
+    if _state_machine is None:
+        return {"enabled": False, "state": "UNAVAILABLE",
+                "detail": "signatures.json not loaded"}
+
+    recording = _is_recording()
+    if recording:
+        mode = "recording"
+    elif not _monitor_enabled:
+        mode = "disabled"
+    else:
+        mode = "monitoring"
+
+    return {
+        "enabled": _monitor_enabled,
+        "mode": mode,
+        "state": _state_machine.current_state,
+        "state_changed_at": _state_machine.state_changed_at,
+        "candidate_state": _state_machine.candidate_state,
+        "candidate_count": _state_machine.candidate_count,
+        "last_sample_time": _last_sample_time,
+        "last_sample_label": _last_sample_label,
+        "last_sample_distance": _last_sample_distance,
+        "last_sample_distances": _last_sample_distances,
+        "calibrated": _cal_offset is not None,
+        "interval_sec": MONITOR_INTERVAL_SEC,
     }
 
-    async function doStop() {
-      await fetch('/stop', {method: 'POST'});
-      stopPolling();
-      refreshAll();
+
+@app.post("/monitor/enable")
+async def monitor_enable():
+    global _monitor_enabled
+    _monitor_enabled = True
+    return {"enabled": True}
+
+
+@app.post("/monitor/disable")
+async def monitor_disable():
+    global _monitor_enabled
+    _monitor_enabled = False
+    return {"enabled": False}
+
+
+@app.post("/monitor/calibrate")
+async def monitor_calibrate():
+    global _cal_offset
+    if _mel_fb is None:
+        raise HTTPException(503, "Monitor not initialized")
+    if _is_recording():
+        raise HTTPException(409, "Cannot calibrate while recording")
+
+    logger.info("Calibration: capturing 30s of quiet audio...")
+    async with _mic_lock:
+        pcm = await asyncio.to_thread(monitor.capture_sample, 30.0)
+    vec = monitor.log_mel_mean(pcm, _signatures["n_fft"],
+                               _signatures["hop"], _mel_fb)
+    stopped_mean = np.array(_signatures["states"]["BOTH_STOPPED"]["mean_db"],
+                            dtype=np.float32)
+    offset = vec - stopped_mean
+    monitor.save_calibration(offset)
+    _cal_offset = offset
+    logger.info("Calibration saved (mean offset: %.1f dB)", float(offset.mean()))
+    return {"status": "calibrated",
+            "mean_offset_db": round(float(offset.mean()), 2)}
+
+
+@app.post("/monitor/sample")
+async def monitor_sample_now():
+    global _last_sample_time, _last_sample_distances
+    global _last_sample_label, _last_sample_distance
+
+    if _mel_fb is None or _state_machine is None:
+        raise HTTPException(503, "Monitor not initialized")
+    if _is_recording():
+        raise HTTPException(409, "Cannot sample while recording")
+
+    async with _mic_lock:
+        pcm = await asyncio.to_thread(monitor.capture_sample, SAMPLE_SECONDS)
+    vec = monitor.log_mel_mean(pcm, _signatures["n_fft"],
+                               _signatures["hop"], _mel_fb)
+    if _cal_offset is not None:
+        vec = vec - _cal_offset
+
+    label, dist, all_d = monitor.classify(
+        vec, _signatures, max_dist=MAX_DIST_FOR_CONFIDENCE)
+
+    _last_sample_time = time.time()
+    _last_sample_distances = all_d
+    _last_sample_label = label
+    _last_sample_distance = dist
+
+    logger.info("Manual sample: %s (dist=%.2f)", label, dist)
+
+    events = _step_and_track(label, vec, dist, all_d)
+
+    return {
+        "label": label,
+        "distance": dist,
+        "distances": all_d,
+        "state": _state_machine.current_state,
+        "events": [e.kind for e in events],
     }
 
-    function startPolling() {
-      stopPolling();
-      polling = setInterval(refreshStatus, 1000);
+
+@app.post("/monitor/retrain")
+async def monitor_retrain(body: dict):
+    global _last_sample_time, _last_sample_distances
+    global _last_sample_label, _last_sample_distance
+
+    state = body.get("state", "").upper()
+    if state not in monitor.VALID_STATES:
+        raise HTTPException(400, f"Invalid state: {state}")
+    if _mel_fb is None or _state_machine is None:
+        raise HTTPException(503, "Monitor not initialized")
+    if _is_recording():
+        raise HTTPException(409, "Cannot retrain while recording")
+
+    async with _mic_lock:
+        pcm = await asyncio.to_thread(monitor.capture_sample, SAMPLE_SECONDS)
+    vec = monitor.log_mel_mean(pcm, _signatures["n_fft"],
+                               _signatures["hop"], _mel_fb)
+    if _cal_offset is not None:
+        vec = vec - _cal_offset
+
+    old_label, old_dist, old_dists = monitor.classify(
+        vec, _signatures, max_dist=MAX_DIST_FOR_CONFIDENCE)
+
+    monitor.blend_signature(_signatures, state, vec, alpha=RETRAIN_ALPHA)
+
+    sig_path = Path(__file__).with_name("signatures.json")
+    monitor.save_signatures(_signatures, sig_path)
+
+    new_label, new_dist, new_dists = monitor.classify(
+        vec, _signatures, max_dist=MAX_DIST_FOR_CONFIDENCE)
+
+    _last_sample_time = time.time()
+    _last_sample_distances = new_dists
+    _last_sample_label = new_label
+    _last_sample_distance = new_dist
+
+    logger.info("Retrain: user labeled %s (was %s dist=%.2f, now %s dist=%.2f)",
+                state, old_label, old_dist, new_label, new_dist)
+
+    events = _step_and_track(new_label, vec, new_dist, new_dists)
+
+    return {
+        "status": "ok",
+        "labeled_state": state,
+        "before": {"label": old_label, "distance": old_dist, "distances": old_dists},
+        "after": {"label": new_label, "distance": new_dist, "distances": new_dists},
+        "current_state": _state_machine.current_state,
     }
 
-    function stopPolling() {
-      if (polling) { clearInterval(polling); polling = null; }
-    }
 
-    function fmtDuration(s) {
-      if (s == null) return '';
-      const m = Math.floor(s / 60);
-      const sec = Math.floor(s % 60);
-      return m + ':' + String(sec).padStart(2, '0');
-    }
+@app.get("/monitor/log")
+async def monitor_log(limit: int = 50):
+    if _state_machine is None:
+        return []
+    entries = _state_machine.log[-limit:]
+    return entries
 
-    function fmtSize(bytes) {
-      if (bytes < 1024) return bytes + ' B';
-      if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
-      return (bytes / 1048576).toFixed(1) + ' MB';
-    }
 
-    async function addNote() {
-      const input = document.getElementById('noteText');
-      const text = input.value.trim();
-      if (!text) return;
-      const r = await fetch('/note', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({text})
-      });
-      if (r.ok) {
-        input.value = '';
-        refreshNotes();
-      } else {
-        alert((await r.json()).detail || 'Failed');
-      }
-    }
+@app.get("/healthz")
+async def healthz():
+    """Cheap liveness probe.
 
-    function addPreset(label) {
-      document.getElementById('noteText').value = label;
-      addNote();
-    }
+    Returns ok=False with HTTP 503 if the monitor is enabled but hasn't
+    produced a fresh sample within ~3x the sample interval. Suitable for
+    a local cron/systemd timer that bounces the service on failure.
+    """
+    now = time.time()
+    last_age = (now - _last_sample_time) if _last_sample_time else None
+    # Generous threshold: 3 intervals + sample duration buffer.
+    stale_after = 3 * MONITOR_INTERVAL_SEC + 30
+    monitor_active = _monitor_enabled and not _is_recording() \
+        and _state_machine is not None
+    stale = bool(monitor_active and last_age is not None and last_age > stale_after)
 
-    async function refreshNotes() {
-      const sr = await fetch('/status');
-      const st = await sr.json();
-      if (!st.recording) return;
-      const r = await fetch('/recordings/' + st.filename + '/notes');
-      const d = await r.json();
-      const el = document.getElementById('notesLog');
-      if (d.notes.length === 0) {
-        el.innerHTML = '';
-        return;
-      }
-      el.innerHTML = d.notes.map(n =>
-        '<div class="note-entry"><span>' + fmtDuration(n.elapsed) + '</span>' + n.note + '</div>'
-      ).join('');
-      el.scrollTop = el.scrollHeight;
+    body = {
+        "ok": not stale,
+        "uptime_sec": round(now - _process_start_time, 1),
+        "last_sample_age_sec": round(last_age, 1) if last_age is not None else None,
+        "consecutive_sample_failures": _consecutive_sample_failures,
+        "recording": _is_recording(),
+        "monitor_enabled": _monitor_enabled,
+        "state": _state_machine.current_state if _state_machine else None,
     }
+    if stale:
+        raise HTTPException(status_code=503, detail=body)
+    return body
 
-    async function refreshStatus() {
-      const r = await fetch('/status');
-      const d = await r.json();
-      const el = document.getElementById('status');
-      const btnRec = document.getElementById('btnRec');
-      const btnStop = document.getElementById('btnStop');
-      const notesCard = document.getElementById('notesCard');
-      if (d.recording) {
-        el.className = 'status recording';
-        el.textContent = 'Recording ' + fmtDuration(d.elapsed) + ' \\u2014 ' + d.filename;
-        btnRec.disabled = true;
-        btnStop.disabled = false;
-        notesCard.className = 'card notes-card active';
-      } else {
-        el.className = 'status idle';
-        el.textContent = 'Idle';
-        btnRec.disabled = false;
-        btnStop.disabled = true;
-        notesCard.className = 'card notes-card';
-        stopPolling();
-      }
-    }
 
-    async function refreshList() {
-      const r = await fetch('/recordings');
-      const files = await r.json();
-      const el = document.getElementById('list');
-      if (files.length === 0) {
-        el.innerHTML = '<p class="empty">No recordings yet</p>';
-        return;
-      }
-      el.innerHTML = files.map(f => `
-        <div class="file">
-          <div class="file-header">
-            <div>
-              <div class="file-name">${f.name}</div>
-              <div class="file-meta">${fmtSize(f.size)}${f.duration != null ? ' \\u00b7 ' + fmtDuration(f.duration) : ''}${f.notes_count ? ' \\u00b7 ' + f.notes_count + ' note' + (f.notes_count > 1 ? 's' : '') : ''}</div>
-            </div>
-            <div class="file-actions">
-              <a href="/recordings/${f.name}/zip"><button title="Download zip"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></a>
-              <button class="del" onclick="doDelete('${f.name}')" title="Delete"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>
-            </div>
-          </div>
-          <audio controls preload="none" src="/recordings/${f.name}"></audio>
-        </div>
-      `).join('');
-    }
+_STATIC_DIR = Path(__file__).resolve().parent
 
-    async function doDelete(name) {
-      if (!confirm('Delete ' + name + '?')) return;
-      await fetch('/recordings/' + name, {method: 'DELETE'});
-      refreshList();
-    }
 
-    function refreshAll() {
-      refreshStatus().then(() => refreshNotes());
-      refreshList();
-    }
+@app.get("/machines.png")
+async def machines_image():
+    return FileResponse(_STATIC_DIR / "machines.png", media_type="image/png")
 
-    refreshAll();
-  </script>
-</body>
-</html>
-"""
+
+@app.get("/clothes.png")
+async def clothes_image():
+    return FileResponse(_STATIC_DIR / "clothes.png", media_type="image/png")
 
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    return INDEX_HTML
+    return (_STATIC_DIR / "index.html").read_text()
 
 
 if __name__ == "__main__":

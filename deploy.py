@@ -13,8 +13,16 @@ CERT_DIR = "/etc/laundry-sensor"
 
 APP_FILES = [
     "laundry_server.py",
+    "monitor.py",
+    "signatures.json",
     "requirements.txt",
     "laundry-sensor.service",
+    "index.html",
+    "machines.png",
+    "clothes.png",
+    "history.log",
+    "health-check.sh",
+    "99-usb-audio-noautosuspend.rules",
 ]
 
 REPO_DIR = Path(__file__).resolve().parent
@@ -23,9 +31,13 @@ REMOTE_SETUP = f"""\
 #!/usr/bin/env bash
 set -e
 
-echo "[2/5] Installing app and dependencies..."
+echo "[2/6] Installing app and dependencies..."
 sudo mkdir -p {INSTALL_DIR}
-sudo cp {REMOTE_TMP}/laundry_server.py {REMOTE_TMP}/requirements.txt {INSTALL_DIR}/
+sudo cp {REMOTE_TMP}/laundry_server.py {REMOTE_TMP}/monitor.py \\
+       {REMOTE_TMP}/signatures.json {REMOTE_TMP}/requirements.txt \\
+       {REMOTE_TMP}/index.html {REMOTE_TMP}/machines.png {REMOTE_TMP}/clothes.png \\
+       {REMOTE_TMP}/history.log {INSTALL_DIR}/
+sudo install -m 755 {REMOTE_TMP}/health-check.sh {INSTALL_DIR}/health-check.sh
 if [ ! -d {INSTALL_DIR}/venv ]; then
     echo "  Creating Python venv..."
     sudo python3 -m venv {INSTALL_DIR}/venv
@@ -34,12 +46,37 @@ echo "  Installing pip packages..."
 sudo {INSTALL_DIR}/venv/bin/pip install --quiet -r {INSTALL_DIR}/requirements.txt
 
 echo ""
-echo "[3/5] Creating recordings directory..."
-sudo mkdir -p /home/willipe/recordings
-sudo chown willipe:willipe /home/willipe/recordings
+echo "[2b/6] Installing USB-audio no-autosuspend udev rule..."
+if ! sudo cmp -s {REMOTE_TMP}/99-usb-audio-noautosuspend.rules \\
+                 /etc/udev/rules.d/99-usb-audio-noautosuspend.rules 2>/dev/null; then
+    sudo cp {REMOTE_TMP}/99-usb-audio-noautosuspend.rules /etc/udev/rules.d/
+    sudo udevadm control --reload-rules
+    sudo udevadm trigger --subsystem-match=usb || true
+    echo "  Installed/refreshed udev rule."
+else
+    echo "  udev rule already up to date."
+fi
 
 echo ""
-echo "[4/5] Ensuring TLS certificate..."
+echo "[2c/6] Installing health-check cron entry..."
+CRON_LINE="* * * * * {INSTALL_DIR}/health-check.sh >> /var/log/laundry-health.log 2>&1"
+EXISTING_CRON="$(sudo crontab -l 2>/dev/null || true)"
+if echo "$EXISTING_CRON" | grep -Fq "{INSTALL_DIR}/health-check.sh"; then
+    echo "  Root cron entry already present."
+else
+    printf '%s\\n%s\\n' "$EXISTING_CRON" "$CRON_LINE" | sed '/^$/d' | sudo crontab -
+    echo "  Installed root cron entry for health-check.sh."
+fi
+
+echo ""
+echo "[3/6] Creating recordings and state directories..."
+sudo mkdir -p /home/willipe/recordings
+sudo chown willipe:willipe /home/willipe/recordings
+sudo mkdir -p /var/lib/laundry-sensor
+sudo mkdir -p /etc/laundry-sensor
+
+echo ""
+echo "[4/6] Ensuring TLS certificate..."
 sudo mkdir -p {CERT_DIR}
 if [ ! -f {CERT_DIR}/cert.pem ]; then
     echo "  Generating self-signed cert..."
@@ -52,7 +89,7 @@ else
 fi
 
 echo ""
-echo "[5/5] Installing systemd service..."
+echo "[5/6] Installing systemd service..."
 sudo cp {REMOTE_TMP}/laundry-sensor.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable laundry-sensor.service
@@ -77,13 +114,22 @@ def run(cmd, **kwargs):
 def main():
     print("=== Laundry Sensor — deploy ===\n")
 
+    # Pull history.log from remote before deploying (preserve observation log)
+    print("[0/6] Pulling history.log from Pi (if it exists)...")
+    local_history = REPO_DIR / "history.log"
+    try:
+        run(f"scp {PI}:{INSTALL_DIR}/history.log {local_history}")
+        print("  Pulled history.log from remote.")
+    except subprocess.CalledProcessError:
+        print("  No history.log on remote yet, skipping pull.")
+
     # Write the remote setup script to a temp file so we can SCP it
     setup_script = Path(tempfile.mktemp(suffix=".sh"))
     setup_script.write_text(REMOTE_SETUP)
 
     try:
         # 1. SCP app files + setup script to the Pi
-        print("[1/5] Copying files to Pi...")
+        print("[1/6] Copying files to Pi...")
         run(f"ssh {PI} 'mkdir -p {REMOTE_TMP}'")
         sources = " ".join(str(REPO_DIR / f) for f in APP_FILES)
         run(f"scp {sources} {setup_script} {PI}:{REMOTE_TMP}/")

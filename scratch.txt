@@ -1,4 +1,8 @@
-arecord -l
-rpicam-jpeg --nopreview -o ~/test.jpg
-rpicam-vid -t 5000 --nopreview --codec libav --libav-format mp4 -o ~/test.mp4
-arecord -D plughw:0 -c1 -r 48000 -f S32_LE -t wav -d 5 ~/test.wav
+Create a plan for simplification of this whole project.
+
+1) The only relevant states from a UI perspective are "Cycles Complete" i.e., BOTH_STOPPED and "Cycles In Progress" i.e., !BOTH_STOPPED
+
+2) I have cut machines.png in half so there will now only be one machine to show, which will be either spinning or not spinning based on the state.
+
+3) Instead of history.json and capturing state changes, we really just need a log that is easy to parse of observations see history.log for example which just has date of observation, colon, observed state.  NOTE: if there is no state change from the previous line in the log, there is no need to write a new line to the log.
+

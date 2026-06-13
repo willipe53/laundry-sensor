@@ -1,0 +1,988 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 -960 960 960' fill='%23000000'%3E%3Cpath d='M240-80q-33 0-56.5-23.5T160-160v-640q0-33 23.5-56.5T240-880h480q33 0 56.5 23.5T800-800v640q0 33-23.5 56.5T720-80H240Zm0-80h480v-640H240v640Zm381.5-98.5Q680-317 680-400t-58.5-141.5Q563-600 480-600t-141.5 58.5Q280-483 280-400t58.5 141.5Q397-200 480-200t141.5-58.5ZM480-268q-26 0-50.5-9.5T386-306l188-188q19 19 28.5 43.5T612-400q0 55-38.5 93.5T480-268ZM320-680q17 0 28.5-11.5T360-720q0-17-11.5-28.5T320-760q-17 0-28.5 11.5T280-720q0 17 11.5 28.5T320-680Zm148.5-11.5Q480-703 480-720t-11.5-28.5Q457-760 440-760t-28.5 11.5Q400-737 400-720t11.5 28.5Q423-680 440-680t28.5-11.5ZM240-160v-640 640Z'/%3E%3C/svg%3E"
+    />
+    <title>Laundry Sensor</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family:
+          system-ui,
+          -apple-system,
+          sans-serif;
+        background: #0f172a;
+        color: #e2e8f0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        min-height: 100vh;
+        padding: 1.5rem 1rem;
+      }
+      h1 {
+        font-size: 1.4rem;
+        font-weight: 600;
+        margin-bottom: 1rem;
+        color: #94a3b8;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+      .card {
+        background: #1e293b;
+        border-radius: 12px;
+        padding: 1.5rem;
+        box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+        width: 100%;
+        max-width: 500px;
+        margin-bottom: 1rem;
+      }
+      .machines-card {
+        max-width: 500px;
+        padding: 1.5rem 1.5rem 0.5rem;
+      }
+
+      /* Machine visualization */
+      .machines-wrapper {
+        width: 100%;
+        overflow: hidden;
+      }
+      .machines-container {
+        position: relative;
+        width: 405px;
+        height: 574px;
+        margin: 0 auto;
+        transform-origin: top center;
+      }
+      .clothes-layer {
+        position: absolute;
+        width: 341px;
+        height: 341px;
+        background-image: url("clothes.png");
+        background-size: cover;
+        border-radius: 50%;
+        left: 30.5px;
+        top: 88.5px;
+      }
+      .machines-overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 405px;
+        height: 574px;
+        background-image: url("machines.png");
+        background-size: cover;
+        pointer-events: none;
+      }
+
+      /* Monitor badge & timer */
+      .mon-badge {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.6rem;
+        margin-bottom: 0.5rem;
+      }
+      .mon-dot {
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+      .mon-label {
+        font-size: 1.3rem;
+        font-weight: 600;
+        letter-spacing: 0.03em;
+      }
+      .mon-timer {
+        text-align: center;
+        font-size: 0.85rem;
+        color: #94a3b8;
+        margin-bottom: 0.75rem;
+      }
+
+      /* Monitor controls card */
+      .mon-history {
+        display: flex;
+        gap: 0.3rem;
+        flex-wrap: wrap;
+        justify-content: center;
+        margin-bottom: 0.75rem;
+      }
+      .mon-pill {
+        padding: 0.2rem 0.5rem;
+        border-radius: 999px;
+        font-size: 0.65rem;
+        background: #334155;
+        color: #94a3b8;
+        white-space: nowrap;
+      }
+      .mon-distances {
+        display: grid;
+        grid-template-columns: auto 1fr auto;
+        gap: 0.3rem 0.6rem;
+        align-items: center;
+        font-size: 0.75rem;
+        margin-bottom: 0.75rem;
+      }
+      .mon-distances .bar-bg {
+        height: 6px;
+        background: #334155;
+        border-radius: 3px;
+        overflow: hidden;
+      }
+      .mon-distances .bar-fg {
+        height: 100%;
+        border-radius: 3px;
+        transition: width 0.3s;
+      }
+      .mon-controls {
+        display: flex;
+        gap: 0.5rem;
+        justify-content: center;
+        flex-wrap: wrap;
+        margin-bottom: 0.75rem;
+      }
+      .mon-controls button {
+        padding: 0.4rem 0.9rem;
+        font-size: 0.8rem;
+      }
+      .mon-meta {
+        text-align: center;
+        font-size: 0.7rem;
+        color: #475569;
+      }
+
+      /* Retrain dialog */
+      .retrain-overlay {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.6);
+        z-index: 100;
+        justify-content: center;
+        align-items: center;
+      }
+      .retrain-overlay.active {
+        display: flex;
+      }
+      .retrain-dialog {
+        background: #1e293b;
+        border-radius: 12px;
+        padding: 1.5rem;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+        max-width: 360px;
+        width: 90%;
+        text-align: center;
+      }
+      .retrain-dialog h3 {
+        font-size: 1rem;
+        font-weight: 600;
+        color: #e2e8f0;
+        margin-bottom: 0.5rem;
+      }
+      .retrain-dialog .retrain-info {
+        font-size: 0.8rem;
+        color: #94a3b8;
+        margin-bottom: 1rem;
+      }
+      .retrain-dialog .retrain-status {
+        font-size: 0.85rem;
+        color: #fde68a;
+        margin-bottom: 1rem;
+        min-height: 1.2em;
+      }
+      .retrain-states {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0.5rem;
+        margin-bottom: 1rem;
+      }
+      .retrain-states button {
+        padding: 0.6rem 0.5rem;
+        font-size: 0.85rem;
+        border-color: #475569;
+      }
+      .retrain-states button:hover:not(:disabled) {
+        background: #334155;
+      }
+      .retrain-cancel {
+        font-size: 0.8rem;
+        color: #64748b;
+        border-color: #334155;
+        padding: 0.4rem 1rem;
+      }
+
+      /* Record / status */
+      .status {
+        text-align: center;
+        font-size: 1rem;
+        margin-bottom: 1rem;
+        min-height: 1.5em;
+      }
+      .status.idle {
+        color: #64748b;
+      }
+      .status.recording {
+        color: #f87171;
+      }
+      .controls {
+        display: flex;
+        gap: 0.75rem;
+        justify-content: center;
+      }
+      button {
+        padding: 0.6rem 1.5rem;
+        border: 1px solid #334155;
+        border-radius: 8px;
+        background: #1e293b;
+        color: #cbd5e1;
+        font-size: 0.95rem;
+        cursor: pointer;
+        transition:
+          background 0.15s,
+          opacity 0.15s;
+      }
+      button:hover:not(:disabled) {
+        background: #334155;
+      }
+      button:disabled {
+        opacity: 0.35;
+        cursor: default;
+      }
+      button.rec {
+        border-color: #991b1b;
+        color: #fca5a5;
+      }
+      button.rec:hover:not(:disabled) {
+        background: #450a0a;
+      }
+      button.stop {
+        border-color: #854d0e;
+        color: #fde68a;
+      }
+      button.stop:hover:not(:disabled) {
+        background: #451a03;
+      }
+      h2 {
+        font-size: 1rem;
+        font-weight: 500;
+        color: #94a3b8;
+        margin-bottom: 0.75rem;
+      }
+
+      /* Notes */
+      .notes-section {
+        display: none;
+      }
+      .notes-section.active {
+        display: block;
+        margin-top: 1rem;
+        border-top: 1px solid #334155;
+        padding-top: 1rem;
+      }
+      .note-input {
+        display: flex;
+        gap: 0.5rem;
+        margin-bottom: 0.75rem;
+      }
+      .note-input input {
+        flex: 1;
+        padding: 0.5rem 0.75rem;
+        border: 1px solid #334155;
+        border-radius: 8px;
+        background: #0f172a;
+        color: #e2e8f0;
+        font-size: 0.9rem;
+        outline: none;
+      }
+      .note-input input:focus {
+        border-color: #475569;
+      }
+      .presets {
+        display: flex;
+        gap: 0.4rem;
+        flex-wrap: wrap;
+        margin-bottom: 0.75rem;
+      }
+      .presets button {
+        padding: 0.3rem 0.7rem;
+        font-size: 0.75rem;
+        border-color: #1e40af;
+        color: #93c5fd;
+      }
+      .presets button:hover {
+        background: #1e3a5f;
+      }
+      .notes-log {
+        max-height: 200px;
+        overflow-y: auto;
+        font-size: 0.8rem;
+      }
+      .note-entry {
+        padding: 0.3rem 0;
+        border-bottom: 1px solid #1e293b;
+        color: #94a3b8;
+      }
+      .note-entry span {
+        color: #64748b;
+        margin-right: 0.5rem;
+      }
+
+      /* Recordings */
+      .empty {
+        color: #475569;
+        font-size: 0.85rem;
+      }
+      .file {
+        padding: 0.75rem 0;
+        border-bottom: 1px solid #334155;
+      }
+      .file:last-child {
+        border-bottom: none;
+      }
+      .file-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 0.4rem;
+      }
+      .file-name {
+        font-size: 0.85rem;
+        color: #cbd5e1;
+        word-break: break-all;
+      }
+      .file-meta {
+        font-size: 0.75rem;
+        color: #64748b;
+      }
+      .file-actions {
+        display: flex;
+        gap: 0.5rem;
+        flex-shrink: 0;
+      }
+      .file-actions button {
+        padding: 0.35rem 0.5rem;
+        font-size: 0.8rem;
+        border-radius: 6px;
+        display: flex;
+        align-items: center;
+      }
+      .file-actions .del {
+        border-color: #991b1b;
+        color: #fca5a5;
+      }
+      .file-actions .del:hover {
+        background: #450a0a;
+      }
+      .file-actions svg {
+        display: block;
+      }
+      audio {
+        width: 100%;
+        height: 36px;
+        margin-top: 0.4rem;
+        border-radius: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Laundry Sensor</h1>
+
+    <!-- Pane 1: Machine Visualization -->
+    <div class="card machines-card">
+      <div class="mon-badge">
+        <span class="mon-dot" id="monDot" style="background: #475569"></span>
+        <span class="mon-label" id="monLabel">Loading...</span>
+      </div>
+      <div class="mon-timer" id="monTimer"></div>
+      <div class="machines-wrapper">
+        <div class="machines-container">
+          <div id="clothesMachine" class="clothes-layer"></div>
+          <div class="machines-overlay"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Pane 2: Monitor Controls -->
+    <div class="card">
+      <div class="mon-history" id="monHistory"></div>
+      <div class="mon-distances" id="monDistances"></div>
+      <div
+        style="
+          text-align: center;
+          font-size: 0.7rem;
+          color: #64748b;
+          margin-bottom: 0.75rem;
+        "
+      >
+        The lowest distance from the reference sample is the winner
+      </div>
+      <div class="mon-controls">
+        <button id="btnSample" onclick="doSampleNow()">Sample Now</button>
+        <button id="btnRetrain" onclick="doRetrain()">Retrain</button>
+      </div>
+      <div class="mon-meta" id="monMeta"></div>
+    </div>
+
+    <!-- Pane 3: Record / Stop -->
+    <div class="card">
+      <div id="status" class="status idle">Idle</div>
+      <div class="controls">
+        <button class="rec" id="btnRec" onclick="doRecord()">
+          <svg
+            width="10"
+            height="10"
+            viewBox="0 0 10 10"
+            style="margin-right: 6px; vertical-align: middle"
+          >
+            <circle cx="5" cy="5" r="5" fill="#ef4444" /></svg
+          >Record
+        </button>
+        <button class="stop" id="btnStop" onclick="doStop()" disabled>
+          <svg
+            width="10"
+            height="10"
+            viewBox="0 0 10 10"
+            style="margin-right: 6px; vertical-align: middle"
+          >
+            <rect width="10" height="10" rx="1" fill="#9ca3af" /></svg
+          >Stop
+        </button>
+      </div>
+      <div class="notes-section" id="notesSection">
+        <h2>Notes</h2>
+        <div class="presets">
+          <button onclick="addPreset('BOTH_STOPPED')">Both Stopped</button>
+          <button onclick="addPreset('WASHER_ONLY')">Washer Only</button>
+          <button onclick="addPreset('DRYER_ONLY')">Dryer Only</button>
+          <button onclick="addPreset('BOTH_RUNNING')">Both Running</button>
+        </div>
+        <div class="note-input">
+          <input
+            type="text"
+            id="noteText"
+            placeholder="Add a note..."
+            onkeydown="if (event.key === 'Enter') addNote();"
+          />
+          <button onclick="addNote()">Add</button>
+        </div>
+        <div class="notes-log" id="notesLog"></div>
+      </div>
+    </div>
+
+    <!-- Pane 4: Recordings -->
+    <div class="card">
+      <h2>Recordings</h2>
+      <div id="list"><p class="empty">Loading...</p></div>
+    </div>
+
+    <div class="retrain-overlay" id="retrainOverlay">
+      <div class="retrain-dialog">
+        <h3>Retrain</h3>
+        <div class="retrain-status" id="retrainStatus"></div>
+        <div class="retrain-info">Choose the actual state right now:</div>
+        <div class="retrain-states" id="retrainButtons">
+          <button onclick="submitRetrain('BOTH_STOPPED')">Both Stopped</button>
+          <button onclick="submitRetrain('WASHER_ONLY')">Washer Only</button>
+          <button onclick="submitRetrain('DRYER_ONLY')">Dryer Only</button>
+          <button onclick="submitRetrain('BOTH_RUNNING')">Both Running</button>
+        </div>
+        <button class="retrain-cancel" onclick="closeRetrain()">Cancel</button>
+      </div>
+    </div>
+
+    <script>
+      /* ---- Machine animation state ---- */
+      var baseDegrees = 30;
+      var baseIntervalMs = 100;
+
+      var machineEl = document.getElementById("clothesMachine");
+      var machineAnim = {
+        on: false,
+        angle: 0,
+        timer: null,
+        degrees: 30,
+        interval: 100,
+        dir: -1,
+      };
+      var wobbleTimer = null;
+
+      function animTick() {
+        machineAnim.angle =
+          (machineAnim.angle + machineAnim.degrees * machineAnim.dir + 360) %
+          360;
+        machineEl.style.transform = "rotate(" + machineAnim.angle + "deg)";
+      }
+
+      function startAnim() {
+        if (machineAnim.timer) clearInterval(machineAnim.timer);
+        machineAnim.on = true;
+        machineAnim.timer = setInterval(animTick, machineAnim.interval);
+        if (!wobbleTimer) wobbleTimer = setInterval(wobble, 5000);
+      }
+
+      function stopAnim() {
+        machineAnim.on = false;
+        if (machineAnim.timer) {
+          clearInterval(machineAnim.timer);
+          machineAnim.timer = null;
+        }
+        if (wobbleTimer) {
+          clearInterval(wobbleTimer);
+          wobbleTimer = null;
+        }
+      }
+
+      function randInt(lo, hi) {
+        return lo + Math.floor(Math.random() * (hi - lo + 1));
+      }
+
+      function wobble() {
+        if (!machineAnim.on) return;
+        var prop = randInt(0, 2);
+        if (prop === 0) {
+          machineAnim.degrees = Math.max(
+            10,
+            Math.min(50, baseDegrees + randInt(-20, 20)),
+          );
+        } else if (prop === 1) {
+          machineAnim.interval = Math.max(
+            16,
+            Math.min(300, baseIntervalMs + randInt(-100, 100)),
+          );
+        } else {
+          machineAnim.dir = machineAnim.dir > 0 ? -1 : 1;
+        }
+        if (machineAnim.timer) {
+          clearInterval(machineAnim.timer);
+          machineAnim.timer = setInterval(animTick, machineAnim.interval);
+        }
+      }
+
+      function syncMachineAnim(monitorState) {
+        var running = monitorState !== "BOTH_STOPPED";
+        if (running && !machineAnim.on) startAnim();
+        else if (!running && machineAnim.on) stopAnim();
+      }
+
+      /* ---- Responsive scaling for machines container ---- */
+      function scaleMachines() {
+        var wrapper = document.querySelector(".machines-wrapper");
+        var container = document.querySelector(".machines-container");
+        if (!wrapper || !container) return;
+        var scale = Math.min(1, wrapper.clientWidth / 405);
+        container.style.transform = "scale(" + scale + ")";
+        wrapper.style.height = Math.ceil(574 * scale) + "px";
+      }
+      window.addEventListener("resize", scaleMachines);
+
+      /* ---- Polling ---- */
+      let polling = null;
+      let monitorPoll = null;
+
+      const BAR_COLORS = {
+        BOTH_STOPPED: "#64748b",
+        WASHER_ONLY: "#3b82f6",
+        DRYER_ONLY: "#f97316",
+        BOTH_RUNNING: "#22c55e",
+      };
+      const STATE_LABELS = {
+        BOTH_STOPPED: "Both Stopped",
+        WASHER_ONLY: "Washer Only",
+        DRYER_ONLY: "Dryer Only",
+        BOTH_RUNNING: "Both Running",
+        UNKNOWN: "Unknown",
+        UNAVAILABLE: "Unavailable",
+      };
+
+      function fmtAgo(epochSec) {
+        if (!epochSec) return "";
+        const s = Math.floor(Date.now() / 1000 - epochSec);
+        if (s < 60) return s + "s";
+        if (s < 3600) return Math.floor(s / 60) + "m";
+        return Math.floor(s / 3600) + "h " + Math.floor((s % 3600) / 60) + "m";
+      }
+
+      async function refreshMonitor() {
+        try {
+          const r = await fetch("/monitor/status");
+          const d = await r.json();
+          const dot = document.getElementById("monDot");
+          const lbl = document.getElementById("monLabel");
+          const timer = document.getElementById("monTimer");
+          const meta = document.getElementById("monMeta");
+
+          let state = d.state || "UNAVAILABLE";
+          let cyclesComplete = state === "BOTH_STOPPED";
+
+          if (d.mode === "recording") {
+            dot.style.background = "#f87171";
+            lbl.style.color = "#fca5a5";
+            lbl.textContent = "Paused \u2014 Recording";
+            syncMachineAnim("BOTH_STOPPED");
+          } else if (d.mode === "disabled") {
+            dot.style.background = "#475569";
+            lbl.style.color = "#64748b";
+            lbl.textContent = "Not Listening";
+            syncMachineAnim("BOTH_STOPPED");
+          } else if (state === "UNKNOWN" || state === "UNAVAILABLE") {
+            dot.style.background = "#eab308";
+            lbl.style.color = "#fde047";
+            lbl.textContent = state === "UNKNOWN" ? "Unknown" : "Unavailable";
+            syncMachineAnim("BOTH_STOPPED");
+          } else if (cyclesComplete) {
+            dot.style.background = "#22c55e";
+            lbl.style.color = "#86efac";
+            lbl.textContent = "Cycles Complete";
+            syncMachineAnim("BOTH_STOPPED");
+          } else {
+            dot.style.background = "#3b82f6";
+            lbl.style.color = "#93c5fd";
+            lbl.textContent = "Cycle In Progress";
+            syncMachineAnim(state);
+          }
+
+          if (d.mode === "disabled") {
+            timer.textContent = "";
+          } else if (d.state_changed_at) {
+            timer.textContent = fmtAgo(d.state_changed_at) + " in this state";
+          } else {
+            timer.textContent = "";
+          }
+
+          const dists = d.last_sample_distances || {};
+          const distEl = document.getElementById("monDistances");
+          const matched = state;
+          const distVals = Object.values(dists);
+          const maxDist = distVals.length ? Math.max(...distVals) : 1;
+          let distHtml = "";
+          for (const [name, dist] of Object.entries(dists).sort(
+            (a, b) => a[1] - b[1],
+          )) {
+            const confidence = Math.max(
+              0,
+              Math.min(100, (1 - dist / maxDist) * 100),
+            );
+            const col =
+              name === matched ? BAR_COLORS[name] || "#94a3b8" : "#475569";
+            const label = STATE_LABELS[name] || name;
+            const isMatch = name === matched;
+            distHtml +=
+              '<span style="color:' +
+              (isMatch ? col : "#64748b") +
+              (isMatch ? ";font-weight:600" : "") +
+              '">' +
+              (isMatch ? "\u25B6 " : "\u2003 ") +
+              label +
+              "</span>" +
+              '<div class="bar-bg"><div class="bar-fg" style="width:' +
+              confidence +
+              "%;background:" +
+              col +
+              '"></div></div>' +
+              '<span style="color:#64748b">' +
+              dist.toFixed(1) +
+              "</span>";
+          }
+          distEl.innerHTML = distHtml;
+
+          let parts = [];
+          if (d.calibrated) parts.push("Calibrated");
+          if (d.last_sample_time)
+            parts.push("Last sample " + fmtAgo(d.last_sample_time) + " ago");
+          meta.textContent = parts.join(" \u00b7 ");
+
+          const lr = await fetch("/monitor/log?limit=20");
+          const log = await lr.json();
+          const transitions = log.filter((e) => e.transition);
+          const histEl = document.getElementById("monHistory");
+          if (transitions.length > 0) {
+            histEl.innerHTML = transitions
+              .slice(-6)
+              .map((t) => {
+                const ts = new Date(t.time * 1000);
+                const hm =
+                  ts.getHours().toString().padStart(2, "0") +
+                  ":" +
+                  ts.getMinutes().toString().padStart(2, "0");
+                const from = (
+                  STATE_LABELS[t.transition.from] || t.transition.from
+                ).split(" ")[0];
+                const to = STATE_LABELS[t.transition.to] || t.transition.to;
+                return (
+                  '<span class="mon-pill">' +
+                  from +
+                  " \u2192 " +
+                  to +
+                  " " +
+                  hm +
+                  "</span>"
+                );
+              })
+              .join("");
+          } else {
+            histEl.innerHTML = "";
+          }
+        } catch (e) {}
+      }
+
+      async function doSampleNow() {
+        document.getElementById("btnSample").disabled = true;
+        try {
+          const r = await fetch("/monitor/sample", { method: "POST" });
+          if (!r.ok) {
+            const text = await r.text();
+            try {
+              alert(JSON.parse(text).detail);
+            } catch (_) {
+              alert(text || "Sample failed");
+            }
+          }
+        } catch (e) {
+          alert("Sample failed: " + e);
+        }
+        document.getElementById("btnSample").disabled = false;
+        refreshMonitor();
+      }
+
+      function doRetrain() {
+        var overlay = document.getElementById("retrainOverlay");
+        var status = document.getElementById("retrainStatus");
+        var label = document.getElementById("monLabel");
+        status.textContent = "Sensor thinks: " + label.textContent;
+        setRetrainButtons(true);
+        overlay.className = "retrain-overlay active";
+      }
+
+      function closeRetrain() {
+        document.getElementById("retrainOverlay").className = "retrain-overlay";
+      }
+
+      function setRetrainButtons(enabled) {
+        var btns = document
+          .getElementById("retrainButtons")
+          .querySelectorAll("button");
+        for (var i = 0; i < btns.length; i++) btns[i].disabled = !enabled;
+      }
+
+      async function submitRetrain(state) {
+        var status = document.getElementById("retrainStatus");
+        setRetrainButtons(false);
+        status.textContent = "Capturing audio & retraining...";
+        status.style.color = "#fde68a";
+        try {
+          var r = await fetch("/monitor/retrain", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ state: state }),
+          });
+          var text = await r.text();
+          try {
+            var d = JSON.parse(text);
+            if (r.ok) {
+              var before =
+                d.before.label + " (dist " + d.before.distance.toFixed(1) + ")";
+              var after =
+                d.after.label + " (dist " + d.after.distance.toFixed(1) + ")";
+              status.style.color = "#86efac";
+              status.textContent = "Was: " + before + "  \u2192  Now: " + after;
+              refreshMonitor();
+              setTimeout(closeRetrain, 2000);
+              return;
+            } else {
+              status.style.color = "#fca5a5";
+              status.textContent = d.detail || "Retrain failed";
+            }
+          } catch (_) {
+            status.style.color = "#fca5a5";
+            status.textContent = text || "Retrain failed";
+          }
+        } catch (e) {
+          status.style.color = "#fca5a5";
+          status.textContent = "Error: " + e;
+        }
+        setRetrainButtons(true);
+      }
+
+      async function doRecord() {
+        const r = await fetch("/record", { method: "POST" });
+        if (r.ok) startPolling();
+        else {
+          try {
+            alert((await r.json()).detail);
+          } catch (_) {
+            alert("Failed to start");
+          }
+        }
+        refreshAll();
+      }
+
+      async function doStop() {
+        await fetch("/stop", { method: "POST" });
+        stopPolling();
+        refreshAll();
+      }
+
+      function startPolling() {
+        stopPolling();
+        polling = setInterval(refreshStatus, 1000);
+      }
+
+      function stopPolling() {
+        if (polling) {
+          clearInterval(polling);
+          polling = null;
+        }
+      }
+
+      function fmtDuration(s) {
+        if (s == null) return "";
+        const m = Math.floor(s / 60);
+        const sec = Math.floor(s % 60);
+        return m + ":" + String(sec).padStart(2, "0");
+      }
+
+      function fmtSize(bytes) {
+        if (bytes < 1024) return bytes + " B";
+        if (bytes < 1048576) return (bytes / 1024).toFixed(1) + " KB";
+        return (bytes / 1048576).toFixed(1) + " MB";
+      }
+
+      async function addNote() {
+        const input = document.getElementById("noteText");
+        const text = input.value.trim();
+        if (!text) return;
+        const r = await fetch("/note", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+        });
+        if (r.ok) {
+          input.value = "";
+          refreshNotes();
+        } else {
+          try {
+            alert((await r.json()).detail);
+          } catch (_) {
+            alert("Failed");
+          }
+        }
+      }
+
+      function addPreset(label) {
+        document.getElementById("noteText").value = label;
+        addNote();
+      }
+
+      async function refreshNotes() {
+        try {
+          const sr = await fetch("/status");
+          const st = await sr.json();
+          if (!st.recording) return;
+          const r = await fetch("/recordings/" + st.filename + "/notes");
+          const d = await r.json();
+          const el = document.getElementById("notesLog");
+          if (d.notes.length === 0) {
+            el.innerHTML = "";
+            return;
+          }
+          el.innerHTML = d.notes
+            .map(
+              (n) =>
+                '<div class="note-entry"><span>' +
+                fmtDuration(n.elapsed) +
+                "</span>" +
+                n.note +
+                "</div>",
+            )
+            .join("");
+          el.scrollTop = el.scrollHeight;
+        } catch (e) {}
+      }
+
+      async function refreshStatus() {
+        try {
+          const r = await fetch("/status");
+          const d = await r.json();
+          const el = document.getElementById("status");
+          const btnRec = document.getElementById("btnRec");
+          const btnStop = document.getElementById("btnStop");
+          const notesSection = document.getElementById("notesSection");
+          if (d.recording) {
+            el.className = "status recording";
+            el.textContent =
+              "Recording " + fmtDuration(d.elapsed) + " \u2014 " + d.filename;
+            btnRec.disabled = true;
+            btnStop.disabled = false;
+            notesSection.className = "notes-section active";
+          } else {
+            el.className = "status idle";
+            el.textContent = "Idle";
+            btnRec.disabled = false;
+            btnStop.disabled = true;
+            notesSection.className = "notes-section";
+            stopPolling();
+          }
+        } catch (e) {}
+      }
+
+      async function refreshList() {
+        try {
+          const r = await fetch("/recordings");
+          const files = await r.json();
+          const el = document.getElementById("list");
+          if (files.length === 0) {
+            el.innerHTML = '<p class="empty">No recordings yet</p>';
+            return;
+          }
+          el.innerHTML = files
+            .map(
+              (f) => `
+          <div class="file">
+            <div class="file-header">
+              <div>
+                <div class="file-name">${f.name}</div>
+                <div class="file-meta">${fmtSize(f.size)}${f.duration != null ? " \u00b7 " + fmtDuration(f.duration) : ""}${f.notes_count ? " \u00b7 " + f.notes_count + " note" + (f.notes_count > 1 ? "s" : "") : ""}</div>
+              </div>
+              <div class="file-actions">
+                <a href="/recordings/${f.name}/zip"><button title="Download zip"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button></a>
+                <button class="del" onclick="doDelete('${f.name}')" title="Delete"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>
+              </div>
+            </div>
+            <audio controls preload="none" src="/recordings/${f.name}"></audio>
+          </div>
+        `,
+            )
+            .join("");
+        } catch (e) {}
+      }
+
+      async function doDelete(name) {
+        if (!confirm("Delete " + name + "?")) return;
+        await fetch("/recordings/" + name, { method: "DELETE" });
+        refreshList();
+      }
+
+      function refreshAll() {
+        refreshStatus().then(function () {
+          refreshNotes();
+        });
+        refreshList();
+        refreshMonitor();
+      }
+
+      scaleMachines();
+      refreshAll();
+      monitorPoll = setInterval(refreshMonitor, 30000);
+    </script>
+  </body>
+</html>
