@@ -24,6 +24,11 @@ STATE_FILE = STATE_DIR / "state.json"
 CALIBRATION_FILE = STATE_DIR / "calibration.json"
 
 VALID_STATES = {"BOTH_STOPPED", "WASHER_ONLY", "DRYER_ONLY", "BOTH_RUNNING"}
+ACTIVE_STATES = {"WASHER_ONLY", "DRYER_ONLY", "BOTH_RUNNING"}
+
+# Finish-arming guards (overridable via StateMachine constructor / env in server)
+DEFAULT_MIN_CYCLE_AGE_SEC = 2700  # 45 minutes
+DEFAULT_MIN_IDLE_DWELL_SEC = 300  # 5 minutes
 
 
 # ---------------------------------------------------------------------------
@@ -142,10 +147,63 @@ class StateMachine:
     candidate_count: int = 0
     state_changed_at: float = field(default_factory=time.time)
     debounce_samples: int = 2
+    min_cycle_age_sec: float = DEFAULT_MIN_CYCLE_AGE_SEC
+    min_idle_dwell_sec: float = DEFAULT_MIN_IDLE_DWELL_SEC
+
+    # Notification-layer cycle tracking (soak-resistant finish arming)
+    cycle_started_at: Optional[float] = None
+    idle_since: Optional[float] = None
+    pending_finished: bool = False
 
     # Rolling log of recent classifications
     log: list = field(default_factory=list)
     max_log: int = 200
+
+    def notify_status(self) -> str:
+        """Return idle | running | finished without consuming pending_finished."""
+        if self.pending_finished:
+            return "finished"
+        if self.cycle_started_at is not None or self.current_state in ACTIVE_STATES:
+            return "running"
+        return "idle"
+
+    def consume_finished(self) -> bool:
+        """Clear pending_finished if set. Returns True if a finish was pending."""
+        if not self.pending_finished:
+            return False
+        self.pending_finished = False
+        self._persist()
+        return True
+
+    def _arm_finished_if_ready(self, now: float) -> None:
+        """Arm pending_finished when both soak guards pass during an open cycle."""
+        if self.pending_finished:
+            return
+        if self.cycle_started_at is None or self.idle_since is None:
+            return
+        if self.current_state != "BOTH_STOPPED":
+            return
+        if (now - self.cycle_started_at) < self.min_cycle_age_sec:
+            return
+        if (now - self.idle_since) < self.min_idle_dwell_sec:
+            return
+        self.pending_finished = True
+        self.cycle_started_at = None
+        self.idle_since = None
+        logger.info("Finish armed (cycle age and idle dwell guards passed)")
+
+    def _on_cycle_event(self, kind: str, now: float) -> None:
+        if kind == "CYCLES_IN_PROGRESS":
+            self.pending_finished = False
+            if self.cycle_started_at is None:
+                self.cycle_started_at = now
+            self.idle_since = None
+        elif kind == "CYCLES_COMPLETE":
+            # Quiet gap during an open cycle (or fallback if start was lost)
+            if self.cycle_started_at is None:
+                self.cycle_started_at = now
+            if self.idle_since is None:
+                self.idle_since = now
 
     def step(self, raw_label: str, vec: np.ndarray,
              dist: float, all_dist: dict) -> list[TransitionEvent]:
@@ -173,11 +231,23 @@ class StateMachine:
                 self.candidate_count = 0
                 entry["transition"] = {"from": old, "to": raw_label}
                 if old != "UNKNOWN":
-                    kind = "CYCLES_COMPLETE" if raw_label == "BOTH_STOPPED" else "CYCLES_IN_PROGRESS"
-                    events.append(TransitionEvent(kind=kind, old_state=old, new_state=raw_label))
+                    kind = ("CYCLES_COMPLETE" if raw_label == "BOTH_STOPPED"
+                            else "CYCLES_IN_PROGRESS")
+                    events.append(TransitionEvent(
+                        kind=kind, old_state=old, new_state=raw_label))
+                    self._on_cycle_event(kind, now)
+                elif raw_label in ACTIVE_STATES:
+                    # First confirmed activity after UNKNOWN — open a cycle
+                    self.pending_finished = False
+                    if self.cycle_started_at is None:
+                        self.cycle_started_at = now
+                    self.idle_since = None
         else:
             self.candidate_state = raw_label
             self.candidate_count = 1
+
+        # Steady BOTH_STOPPED ticks (and post-transition) may arm finish
+        self._arm_finished_if_ready(now)
 
         self.log.append(entry)
         if len(self.log) > self.max_log:
@@ -194,14 +264,21 @@ class StateMachine:
                 "candidate_state": self.candidate_state,
                 "candidate_count": self.candidate_count,
                 "state_changed_at": self.state_changed_at,
+                "cycle_started_at": self.cycle_started_at,
+                "idle_since": self.idle_since,
+                "pending_finished": self.pending_finished,
             }
             STATE_FILE.write_text(json.dumps(data, indent=2))
         except OSError as e:
             logger.warning("Could not persist state: %s", e)
 
     @classmethod
-    def load(cls, debounce_samples: int = 2) -> "StateMachine":
-        sm = cls(debounce_samples=debounce_samples)
+    def load(cls, debounce_samples: int = 2,
+             min_cycle_age_sec: float = DEFAULT_MIN_CYCLE_AGE_SEC,
+             min_idle_dwell_sec: float = DEFAULT_MIN_IDLE_DWELL_SEC) -> "StateMachine":
+        sm = cls(debounce_samples=debounce_samples,
+                 min_cycle_age_sec=min_cycle_age_sec,
+                 min_idle_dwell_sec=min_idle_dwell_sec)
         if STATE_FILE.is_file():
             try:
                 data = json.loads(STATE_FILE.read_text())
@@ -209,7 +286,11 @@ class StateMachine:
                 sm.candidate_state = data.get("candidate_state")
                 sm.candidate_count = data.get("candidate_count", 0)
                 sm.state_changed_at = data.get("state_changed_at", time.time())
-                logger.info("Restored state: %s", sm.current_state)
+                sm.cycle_started_at = data.get("cycle_started_at")
+                sm.idle_since = data.get("idle_since")
+                sm.pending_finished = bool(data.get("pending_finished", False))
+                logger.info("Restored state: %s (notify=%s)",
+                            sm.current_state, sm.notify_status())
             except (json.JSONDecodeError, OSError, TypeError, ValueError) as e:
                 logger.warning("Could not load persisted state: %s", e)
         return sm

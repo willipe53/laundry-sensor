@@ -20,14 +20,78 @@ mic, computes a 32-band log-mel energy fingerprint, and compares it
 | DRYER_ONLY | Dryer running, washer off |
 | BOTH_RUNNING | Both machines running |
 
-The UI collapses these into two user-facing states:
+The UI and Shortcuts API collapse these into three user-facing statuses
+(with soak-resistant finish guards — see below):
 
-- **Cycles Complete** (green) — `BOTH_STOPPED`
-- **Cycles In Progress** (blue, machine animates) — any other state
+- **Cycle In Progress** (`running`) — any machine active, or a quiet gap
+  mid-cycle that has not yet passed the finish guards
+- **Finished** (`finished`) — a load completed and the one-shot notify
+  has not been consumed yet
+- **Idle** (`idle`) — machines stopped with no open cycle / nothing to notify
 
 A debounce of 2 consecutive samples is required before a state
 transition is accepted, preventing brief noise from causing false
 switches. State changes are logged to `history.log` with timestamps.
+
+### Mac Shortcuts notifications
+
+Poll `GET https://laundry/status` from the Shortcuts app on your Mac
+to raise a notification when a load finishes. The endpoint returns one of:
+
+```json
+{"status": "running"}
+{"status": "finished"}
+{"status": "idle"}
+```
+
+![Laundry Notification Shortcut](laundry_shortcut.png)
+
+Example shortcut:
+
+1. **Get contents of** `https://laundry/status`
+2. **Get Dictionary Value** for key `status`
+3. **If** that value **is** `finished` → **Show Notification**
+   (e.g. “The laundry is done!”)
+
+`finished` is edge-triggered and **consumed on read**: the first poll
+after a completed load returns `finished`; later polls return `idle`
+until another load runs and completes. Overnight quiet stays `idle`,
+so a scheduled shortcut will not keep notifying.
+
+Ignore `running` and `idle` — only notify on `finished`.
+
+To poll automatically every 2 minutes, install the LaunchAgent from
+[`com.willipe.laundry-notification.plist`](com.willipe.laundry-notification.plist)
+(shortcut name must be exactly `Laundry Notification`):
+
+```bash
+cp com.willipe.laundry-notification.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.willipe.laundry-notification.plist
+```
+
+Useful follow-ups:
+
+```bash
+# Check it's loaded
+launchctl print gui/$(id -u)/com.willipe.laundry-notification
+
+# Logs
+tail -f ~/Library/Logs/laundry-notification.log
+
+# Unload later
+launchctl bootout gui/$(id -u)/com.willipe.laundry-notification
+```
+
+Finish is only armed when **both** guards pass:
+
+| Guard | Default | Purpose |
+|-------|---------|---------|
+| Min cycle age | 45 min (`MIN_CYCLE_AGE_SEC`) | Ignore early washer soak / quiet |
+| Min idle dwell | 5 min (`MIN_IDLE_DWELL_SEC`) | Ignore brief misclass / short blips |
+
+The web UI reads the same guarded status via `/monitor/status`
+(`notify_status`) without consuming the Shortcuts one-shot. Recorder
+status lives at `GET /recording/status`.
 
 ## Retraining
 
@@ -126,3 +190,5 @@ All tunables are set via environment variables (defaults shown):
 | `MAX_DIST_FOR_CONFIDENCE` | 50.0 | Distance threshold above which classification is "UNKNOWN" |
 | `RETRAIN_ALPHA` | 0.1 | EMA blend factor for retraining |
 | `CAL_OFFSET_DB` | (empty) | Manual dB offset override (bypasses calibration file) |
+| `MIN_CYCLE_AGE_SEC` | 2700 | Min seconds since cycle start before finish can arm |
+| `MIN_IDLE_DWELL_SEC` | 300 | Min continuous BOTH_STOPPED seconds before finish can arm |

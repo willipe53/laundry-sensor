@@ -622,7 +622,7 @@
           const meta = document.getElementById("monMeta");
 
           let state = d.state || "UNAVAILABLE";
-          let cyclesComplete = state === "BOTH_STOPPED";
+          let notify = d.notify_status || "idle";
 
           if (d.mode === "recording") {
             dot.style.background = "#f87171";
@@ -639,20 +639,27 @@
             lbl.style.color = "#fde047";
             lbl.textContent = state === "UNKNOWN" ? "Unknown" : "Unavailable";
             syncMachineAnim("BOTH_STOPPED");
-          } else if (cyclesComplete) {
+          } else if (notify === "finished") {
             dot.style.background = "#22c55e";
             lbl.style.color = "#86efac";
-            lbl.textContent = "Cycles Complete";
+            lbl.textContent = "Finished";
             syncMachineAnim("BOTH_STOPPED");
-          } else {
+          } else if (notify === "running") {
             dot.style.background = "#3b82f6";
             lbl.style.color = "#93c5fd";
             lbl.textContent = "Cycle In Progress";
             syncMachineAnim(state);
+          } else {
+            dot.style.background = "#22c55e";
+            lbl.style.color = "#86efac";
+            lbl.textContent = "Idle";
+            syncMachineAnim("BOTH_STOPPED");
           }
 
           if (d.mode === "disabled") {
             timer.textContent = "";
+          } else if (notify === "running" && d.cycle_started_at) {
+            timer.textContent = fmtAgo(d.cycle_started_at) + " into cycle";
           } else if (d.state_changed_at) {
             timer.textContent = fmtAgo(d.state_changed_at) + " in this state";
           } else {
@@ -885,7 +892,7 @@
 
       async function refreshNotes() {
         try {
-          const sr = await fetch("/status");
+          const sr = await fetch("/recording/status");
           const st = await sr.json();
           if (!st.recording) return;
           const r = await fetch("/recordings/" + st.filename + "/notes");
@@ -911,7 +918,7 @@
 
       async function refreshStatus() {
         try {
-          const r = await fetch("/status");
+          const r = await fetch("/recording/status");
           const d = await r.json();
           const el = document.getElementById("status");
           const btnRec = document.getElementById("btnRec");

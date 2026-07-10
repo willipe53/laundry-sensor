@@ -36,6 +36,8 @@ DEBOUNCE_SAMPLES = int(os.environ.get("DEBOUNCE_SAMPLES", "2"))
 MAX_DIST_FOR_CONFIDENCE = float(os.environ.get("MAX_DIST_FOR_CONFIDENCE", "50.0"))
 CAL_OFFSET_DB = os.environ.get("CAL_OFFSET_DB", "")
 RETRAIN_ALPHA = float(os.environ.get("RETRAIN_ALPHA", "0.1"))
+MIN_CYCLE_AGE_SEC = float(os.environ.get("MIN_CYCLE_AGE_SEC", "2700"))
+MIN_IDLE_DWELL_SEC = float(os.environ.get("MIN_IDLE_DWELL_SEC", "300"))
 # After this many consecutive failed samples, exit so systemd restarts us.
 # At the default 5-min interval, 5 failures = ~25 minutes of bad mic state.
 MAX_CONSECUTIVE_SAMPLE_FAILURES = int(
@@ -141,7 +143,9 @@ async def lifespan(app: FastAPI):
             _signatures["sample_rate"], _signatures["n_fft"],
             _signatures["n_mel"], _signatures["fmin"], _signatures["fmax"])
         _state_machine = monitor.StateMachine.load(
-            debounce_samples=DEBOUNCE_SAMPLES)
+            debounce_samples=DEBOUNCE_SAMPLES,
+            min_cycle_age_sec=MIN_CYCLE_AGE_SEC,
+            min_idle_dwell_sec=MIN_IDLE_DWELL_SEC)
         _cal_offset = monitor.load_calibration()
         if CAL_OFFSET_DB:
             _cal_offset = np.full(_signatures["n_mel"],
@@ -262,12 +266,23 @@ async def stop_recording():
     return {"status": "stopped", "filename": stopped_file}
 
 
-@app.get("/status")
+@app.get("/recording/status")
 async def recording_status():
     if _is_recording():
         elapsed = time.monotonic() - _recording_start if _recording_start else 0
         return {"recording": True, "filename": _recording_file, "elapsed": round(elapsed, 1)}
     return {"recording": False}
+
+
+@app.get("/status")
+async def laundry_status():
+    """Shortcuts-friendly laundry notify status (consumes finished on read)."""
+    if _state_machine is None:
+        return {"status": "idle"}
+    status = _state_machine.notify_status()
+    if status == "finished":
+        _state_machine.consume_finished()
+    return {"status": status}
 
 
 def _notes_path(wav_filename: str) -> Path:
@@ -494,6 +509,10 @@ async def monitor_status():
         "state_changed_at": _state_machine.state_changed_at,
         "candidate_state": _state_machine.candidate_state,
         "candidate_count": _state_machine.candidate_count,
+        "notify_status": _state_machine.notify_status(),
+        "cycle_started_at": _state_machine.cycle_started_at,
+        "idle_since": _state_machine.idle_since,
+        "pending_finished": _state_machine.pending_finished,
         "last_sample_time": _last_sample_time,
         "last_sample_label": _last_sample_label,
         "last_sample_distance": _last_sample_distance,
